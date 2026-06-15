@@ -1,6 +1,8 @@
 # Program to recognise sleep gestures in real time
 # Then play a sound effect and send data to lights and other visual components of
 # the installation
+# Part of Hybrid Worlds Installation of Group 1
+# author - Gabriela Ilieva
 
 
 # IMPORTS
