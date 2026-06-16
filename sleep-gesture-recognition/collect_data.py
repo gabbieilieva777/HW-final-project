@@ -1,5 +1,6 @@
 # Script to collect data from mediapipe gestures
-# Numbers 1-5 are used to set label, R is used to record frame
+# Numbers 1-5 are used to start automatic burst recording for hands-free data collection
+# of each pose/gesture
 
 # imports
 import cv2
@@ -7,10 +8,17 @@ import mediapipe as mp
 import numpy as np
 import pandas as pd
 import os
+import time
 
 
 # set output file name
 OUTPUT_FILE = "sleep_gesture_data.csv"
+
+# burst settings for hands-free data collection
+COUNTDOWN_SECONDS = 5
+RECORD_SECONDS = 5
+SAMPLES_PER_SECOND = 10
+SAMPLE_INTERVAL = 1 / SAMPLES_PER_SECOND
 
 
 # MediaPipe setup
@@ -71,8 +79,9 @@ def extract_features(hand_results, pose_results):
     else:
         return None  # no hands detected
 
-    # if only one hand is detected, return None (both required for sleep gesture)
-    if np.all(hand_data["Left"] == 0) or np.all(hand_data["Right"] == 0):
+    # allow recording if at least one hand is detected
+    # this is important because the sleep gesture often hides/overlaps one hand
+    if np.all(hand_data["Left"] == 0) and np.all(hand_data["Right"] == 0):
         return None
 
     # extract useful pose/head landmarks
@@ -165,7 +174,7 @@ print("  2 = sleep_left")
 print("  3 = sleep_right")
 print("  4 = hand_near_face_no_sleep")
 print("  5 = head_lean_only")
-print("  r = record one sample")
+print("  Press a number to start 5s countdown + automatic recording")
 print("  q = quit\n")
 
 # convert keys to ascii for organised way to set strings to keys
@@ -176,6 +185,129 @@ label_map = {
     ord('4'): "hand_near_face_no_sleep",
     ord('5'): "head_lean_only",
 }
+
+# helper function to draw the current MediaPipe detections during countdown/recording
+def draw_detections(frame, hand_results, pose_results):
+    # draw all detected hands
+    if hand_results.multi_hand_landmarks:
+        for hand_landmarks in hand_results.multi_hand_landmarks:
+            mp_draw.draw_landmarks(
+                frame,
+                hand_landmarks,
+                mp_hands.HAND_CONNECTIONS
+            )
+
+    # draw pose landmarks
+    if pose_results.pose_landmarks:
+        mp_draw.draw_landmarks(
+            frame,
+            pose_results.pose_landmarks,
+            mp_pose.POSE_CONNECTIONS
+        )
+
+# helper function to collect a burst of samples after a countdown
+def auto_record(label):
+    global record_count
+
+    print(f"\nGet ready for: {label}")
+    print(f"Recording starts in {COUNTDOWN_SECONDS} seconds...")
+
+    # countdown before recording so you can get into the gesture position
+    countdown_start = time.time()
+
+    while time.time() - countdown_start < COUNTDOWN_SECONDS:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            print("Failed to read from camera.")
+            return
+
+        # flip camera horizontally to make easier to use
+        frame = cv2.flip(frame, 1)
+        # since opencv reads in bgr, we need to convert to rgb for mediapipe
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        hand_results = hands.process(frame_rgb)
+        pose_results = pose.process(frame_rgb)
+
+        draw_detections(frame, hand_results, pose_results)
+
+        remaining = COUNTDOWN_SECONDS - int(time.time() - countdown_start)
+
+        cv2.putText(frame, f"Get ready: {label}", (30, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+
+        cv2.putText(frame, f"Recording in: {remaining}", (30, 110),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+
+        cv2.putText(frame, f"Total saved: {record_count}", (30, 160),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+
+        cv2.imshow("Gesture Data Collection", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            return
+
+    print(f"Recording {label}...")
+
+    # record multiple samples automatically
+    samples_saved = 0
+    failed_samples = 0
+    last_sample_time = 0
+    record_start = time.time()
+
+    while time.time() - record_start < RECORD_SECONDS:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            print("Failed to read from camera.")
+            return
+
+        # flip camera horizontally to make easier to use
+        frame = cv2.flip(frame, 1)
+        # since opencv reads in bgr, we need to convert to rgb for mediapipe
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        hand_results = hands.process(frame_rgb)
+        pose_results = pose.process(frame_rgb)
+
+        draw_detections(frame, hand_results, pose_results)
+
+        now = time.time()
+
+        if now - last_sample_time >= SAMPLE_INTERVAL:
+            # extract full two-hand + pose features
+            features = extract_features(hand_results, pose_results)
+
+            if features is not None:
+                row = list(features) + [label]
+                df_row = pd.DataFrame([row], columns=feature_columns)
+                df_row.to_csv(OUTPUT_FILE, mode='a', header=False, index=False) # mode is append, header shouldn't be duplicated
+                record_count += 1
+                samples_saved += 1
+            else:
+                failed_samples += 1
+
+            last_sample_time = now
+
+        time_left = RECORD_SECONDS - int(time.time() - record_start)
+
+        cv2.putText(frame, f"Recording: {label}", (30, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        cv2.putText(frame, f"Time left: {time_left}", (30, 110),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        cv2.putText(frame, f"Saved this round: {samples_saved}", (30, 160),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        cv2.putText(frame, f"Failed this round: {failed_samples}", (30, 210),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        cv2.imshow("Gesture Data Collection", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            return
+
+    print(f"Done recording {label}. Saved {samples_saved} samples. Failed {failed_samples} samples.")
 
 while True:
     ret, frame = cap.read()
@@ -226,17 +358,7 @@ while True:
     if key in label_map:
         current_label = label_map[key]
         print(f"Current label set to: {current_label}")
-
-    # record features and append them instead of overriding
-    elif key == ord('r'):
-        if features is not None and current_label is not None:
-            row = list(features) + [current_label]
-            df_row = pd.DataFrame([row], columns=feature_columns)
-            df_row.to_csv(OUTPUT_FILE, mode='a', header=False, index=False) # mode is append, header shouldn't be duplicated
-            record_count += 1
-            print(f"Saved sample #{record_count} for {current_label}")
-        else:
-            print("Cannot record: missing both hands, pose or label")
+        auto_record(current_label)
 
     # quit
     elif key == ord('q'):
