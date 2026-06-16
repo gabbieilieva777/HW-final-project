@@ -137,7 +137,7 @@ def extract_features(hand_results, pose_results):
 
     return np.array(features, dtype=np.float32)
 
-# build header row (63 feature columns + 1 label column)
+# build header row (label column + hand and pose features)
 feature_columns = []
 
 # collect left and right hand position
