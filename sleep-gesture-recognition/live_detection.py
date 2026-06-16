@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import time
 import warnings
 from pathlib import Path
 import cv2
@@ -33,8 +34,8 @@ warnings.filterwarnings(
 
 # paths
 BASE_DIR = Path(__file__).resolve().parent
-MODEL = BASE_DIR / "sleep_gesture_svm.joblib"
-AUDIO_PATH = BASE_DIR / "sleepy_sound.wav"   # sound to play when sleep mode is initiated
+MODEL = BASE_DIR / "model" / "sleep_gesture_svm.joblib"
+AUDIO_PATH = BASE_DIR / "aloha.mp3"   # sound to play when sleep mode is initiated
 
 # settings
 CAMERA_INDEX = 0
@@ -44,10 +45,15 @@ MIN_DETECTION_CONFIDENCE = 0.5
 MIN_TRACKING_CONFIDENCE = 0.5
 
 SMOOTHING_WINDOW = 5 # predictions to consider before committing to gesture
-TRIGGER_COOLDOWN = 0.35 # prevent rapid flickering
+TRIGGER_COOLDOWN = 2.0 # prevent rapid flickering
 
 CAMERA_WIDTH = 1280
 CAMERA_HEIGHT = 720
+
+# MediaPipe setup
+mp_hands = mp.solutions.hands
+mp_draw = mp.solutions.drawing_utils
+mp_pose = mp.solutions.pose
 
 # labels for gestures/poses
 LABELS = [
@@ -57,9 +63,8 @@ LABELS = [
     "hand_near_face_no_sleep",
     "head_lean_only",
 ]
+
 FEATURE_COLUMNS = []
-for i in range(21):
-    FEATURE_COLUMNS.extend([f"x{i}", f"y{i}", f"z{i}"])
 
 # collect left and right hand position
 for side in ["left", "right"]:
@@ -98,7 +103,7 @@ class StablePrediction:
     def clear(self) -> None:
         self.history.clear()
 
-# feature extraction like in the data collection scrip
+# feature extraction like in the data collection script
 def extract_features(hand_results, pose_results):
     features = []
 
@@ -187,7 +192,11 @@ def extract_features(hand_results, pose_results):
 # prediction
 def predict_pose_label(features_df: pd.DataFrame, model) -> str | None:
     pred = model.predict(features_df)[0]
-    return pred
+
+    if pred in LABELS:
+        return pred
+
+    return None
 
 
 # draw a label near head
@@ -207,6 +216,7 @@ def draw_label(frame, text: str, x: int, y: int, color=(0, 255, 0)) -> None:
         2,
         cv2.LINE_AA,
     )
+
 def play_sound_effect():
     def _play():
         try:
@@ -215,16 +225,16 @@ def play_sound_effect():
         except Exception as e:
             print(f"Could not play sound effect: {e}")
 
-    threading.Thread(target=_play(), daemon=True).start()
+    threading.Thread(target=_play, daemon=True).start()
 
 
-def initiate_sleep_transition():
-    if predict_pose_label() in ["sleep_left", "sleep_right"]:
+def initiate_sleep_transition(prediction):
+    if prediction in ["sleep_left", "sleep_right"]:
         play_sound_effect()
+
 
 # main
 def main() -> None:
-    global audio_engine
     # check paths
     if not MODEL.exists():
         raise FileNotFoundError(f"Model not found: {MODEL}")
@@ -235,11 +245,6 @@ def main() -> None:
         )
     # load model
     model = joblib.load(MODEL)
-
-    # draw skeleton
-    mp_hands = mp.solutions.hands
-    mp_draw = mp.solutions.drawing_utils
-    mp_pose = mp.solutions.pose
 
     # start webcam
     cap = cv2.VideoCapture(CAMERA_INDEX)
@@ -256,26 +261,28 @@ def main() -> None:
     # stable prediction
     stable_pred = StablePrediction(window_size=SMOOTHING_WINDOW)
 
+    last_triggered = None
+    last_trigger_time = 0.0
+
     # prints
     print("Starting sleep gesture detection...")
     print("Press 'q' to quit.")
 
     # setup skeleton overlay
-
     hands = mp_hands.Hands(
         static_image_mode=False,  # use tracking (video mode)
-        max_num_hands=2,  # collect both hands
+        max_num_hands=MAX_NUM_HANDS,  # collect both hands
         # confidence thresholds
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
+        min_detection_confidence=MIN_DETECTION_CONFIDENCE,
+        min_tracking_confidence=MIN_TRACKING_CONFIDENCE
     )
 
     # create head detector object
     pose = mp_pose.Pose(
         static_image_mode=False,
         # confidence thresholds
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
+        min_detection_confidence=MIN_DETECTION_CONFIDENCE,
+        min_tracking_confidence=MIN_TRACKING_CONFIDENCE
     )
 
     # reading from camera and making predictions
@@ -294,20 +301,88 @@ def main() -> None:
         hand_results = hands.process(frame_rgb)
         pose_results = pose.process(frame_rgb)
 
-        # extract both hands
-        if hand_results.multi_hand_landmarks and hand_results.multi_handedness:
-            for hand_landmarks, handedness in zip(
-                    hand_results.multi_hand_landmarks,
-                    hand_results.multi_handedness
-            ):
-                hand_side = handedness.classification[0].label  # "Left" or "Right"
+        # draw all detected hands
+        if hand_results.multi_hand_landmarks:
+            for hand_landmarks in hand_results.multi_hand_landmarks:
+                mp_draw.draw_landmarks(
+                    frame,
+                    hand_landmarks,
+                    mp_hands.HAND_CONNECTIONS
+                )
 
+        # draw pose landmarks
+        if pose_results.pose_landmarks:
+            mp_draw.draw_landmarks(
+                frame,
+                pose_results.pose_landmarks,
+                mp_pose.POSE_CONNECTIONS
+            )
 
+        # extract full two-hand + pose features
+        features = extract_features(hand_results, pose_results)
+
+        current_prediction = None
+
+        if features is not None:
+            features_df = pd.DataFrame([features], columns=FEATURE_COLUMNS)
+            raw_pred = predict_pose_label(features_df, model)
+            current_prediction = stable_pred.update(raw_pred)
         else:
-            return None  # no hands detected
+            stable_pred.clear()
 
-        # extract useful pose/head landmarks
-        if not pose_results.pose_landmarks:
-            return None
+        # display prediction
+        if current_prediction is None:
+            display_text = "Prediction: no pose detected"
+        else:
+            display_text = f"Prediction: {current_prediction}"
 
-        pose_landmarks = pose_results.pose_landmarks.landmark
+        cv2.putText(
+            frame,
+            display_text,
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
+        # trigger sound effect when sleep gesture is detected
+        now = time.time()
+
+        if (
+            current_prediction in ["sleep_left", "sleep_right"]
+            and current_prediction != last_triggered
+            and now - last_trigger_time > TRIGGER_COOLDOWN
+        ):
+            print(f"ACTION: Sleep gesture detected: {current_prediction}")
+            initiate_sleep_transition(current_prediction)
+            last_triggered = current_prediction
+            last_trigger_time = now
+
+        if current_prediction not in ["sleep_left", "sleep_right"]:
+            last_triggered = None
+
+        cv2.putText(
+            frame,
+            "Press 'q' to quit",
+            (20, 80),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+        cv2.imshow("Sleep Gesture Detection", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
