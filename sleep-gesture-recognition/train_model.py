@@ -25,8 +25,12 @@ from sklearn.metrics import (
 )
 
 # settings
-DATA_PATH = Path("sleep_gesture_data.csv")
-MODEL_DIR = Path("model")
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_PATH = BASE_DIR / "sleep_gesture_data.csv"
+MODEL_DIR = BASE_DIR / "model"
+
 MODEL_DIR.mkdir(exist_ok=True)
 
 # define labels

@@ -9,9 +9,11 @@ import numpy as np
 import pandas as pd
 import os
 import time
+from pathlib import Path
 
 
 # set output file name
+BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_FILE = "sleep_gesture_data.csv"
 
 # burst settings for hands-free data collection
