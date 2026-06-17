@@ -227,10 +227,15 @@ def play_sound_effect():
 
     threading.Thread(target=_play, daemon=True).start()
 
+# TO-DO: edit placeholder function for sending state to circuit to change LEDs
+def send_light_command(command):
+    return
 
 def initiate_sleep_transition(prediction):
     if prediction in ["sleep_left", "sleep_right"]:
         play_sound_effect()
+        send_light_command("SLEEP") # TO-DO: define states and think about having a timer/resetting
+        # for the next user
 
 
 # main
@@ -251,7 +256,7 @@ def main() -> None:
     if not cap.isOpened():
         raise RuntimeError("Could not open webcam.")
 
-    # ssk camera for a normal resolution instead of stretching frames
+    # ask camera for a normal resolution instead of stretching frames
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
 
