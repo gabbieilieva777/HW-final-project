@@ -41,11 +41,19 @@ AUDIO_PATH = BASE_DIR / "aloha.mp3"   # sound to play when sleep mode is initiat
 CAMERA_INDEX = 0
 MAX_NUM_HANDS = 2
 
+# confidence thresholds
 MIN_DETECTION_CONFIDENCE = 0.5
 MIN_TRACKING_CONFIDENCE = 0.5
 
+CONFIDENCE_THRESHOLD = 0.80
+GESTURE_HOLD_SECONDS = 1.5
+SLEEP_DURATION_SECONDS = 10.0
+DEMO_KEY = ord("d") # demo day fallback
+
 SMOOTHING_WINDOW = 5 # predictions to consider before committing to gesture
 TRIGGER_COOLDOWN = 2.0 # prevent rapid flickering
+
+
 
 CAMERA_WIDTH = 1280
 CAMERA_HEIGHT = 720
@@ -189,15 +197,20 @@ def extract_features(hand_results, pose_results):
 
     return np.array(features, dtype=np.float32)
 
-# prediction
-def predict_pose_label(features_df: pd.DataFrame, model) -> str | None:
-    pred = model.predict(features_df)[0]
+# prediction function that returns label + confidence
+def predict_pose_label(features_df: pd.DataFrame, model) -> tuple[str | None, float]:
+    probs = model.predict_proba(features_df)[0]
+    best_index = np.argmax(probs)
+    confidence = probs[best_index]
+    pred = model.classes_[best_index]
+
+    if confidence < CONFIDENCE_THRESHOLD:
+        return None, confidence
 
     if pred in LABELS:
-        return pred
+        return pred, confidence
 
-    return None
-
+    return None, confidence
 
 # draw a label near head
 def draw_label(frame, text: str, x: int, y: int, color=(0, 255, 0)) -> None:
@@ -229,13 +242,17 @@ def play_sound_effect():
 
 # TO-DO: edit placeholder function for sending state to circuit to change LEDs
 def send_light_command(command):
+    if command == "SLEEP":
+        return
+    elif command == "AWAKE":
+        return
     return
 
 def initiate_sleep_transition(prediction):
-    if prediction in ["sleep_left", "sleep_right"]:
-        play_sound_effect()
-        send_light_command("SLEEP") # TO-DO: define states and think about having a timer/resetting
-        # for the next user
+    play_sound_effect()
+
+    # later this is where lights / projections / Arduino commands go
+    print("ACTION: Sleep transition initiated")
 
 
 # main
@@ -266,12 +283,32 @@ def main() -> None:
     # stable prediction
     stable_pred = StablePrediction(window_size=SMOOTHING_WINDOW)
 
+    # sleep/awake state variables
+    current_state = "awake"
+
+    sleep_candidate_start = None
+    sleep_started_time = None
+
     last_triggered = None
     last_trigger_time = 0.0
 
+    # helper function for changing state
+    def change_state(new_state):
+        nonlocal current_state, sleep_started_time
+
+        if current_state == new_state:
+            return
+        # print state change
+        print(f"STATE CHANGE: {current_state} -> {new_state}")
+        current_state = new_state
+        # time tracking and initiating sleep transition
+        if new_state == "asleep":
+            sleep_started_time = time.time()
+            initiate_sleep_transition("sleep")
+
     # prints
     print("Starting sleep gesture detection...")
-    print("Press 'q' to quit.")
+    print("Press 'q' to quit | 'd' for demo")
 
     # setup skeleton overlay
     hands = mp_hands.Hands(
@@ -327,10 +364,11 @@ def main() -> None:
         features = extract_features(hand_results, pose_results)
 
         current_prediction = None
+        confidence = 0.0
 
         if features is not None:
             features_df = pd.DataFrame([features], columns=FEATURE_COLUMNS)
-            raw_pred = predict_pose_label(features_df, model)
+            raw_pred, confidence = predict_pose_label(features_df, model)
             current_prediction = stable_pred.update(raw_pred)
         else:
             stable_pred.clear()
@@ -355,16 +393,30 @@ def main() -> None:
         # trigger sound effect when sleep gesture is detected
         now = time.time()
 
-        if (
-            current_prediction in ["sleep_left", "sleep_right"]
-            and current_prediction != last_triggered
-            and now - last_trigger_time > TRIGGER_COOLDOWN
-        ):
-            print(f"ACTION: Sleep gesture detected: {current_prediction}")
-            initiate_sleep_transition(current_prediction)
-            last_triggered = current_prediction
-            last_trigger_time = now
+        #trigerring sleep gesture if held for a specific time
+        if current_state == "awake":
+            if current_prediction in ["sleep_left", "sleep_right"]:
+                if sleep_candidate_start is None:
+                    sleep_candidate_start = now
 
+                held_time = now - sleep_candidate_start
+
+                if held_time >= GESTURE_HOLD_SECONDS and now - last_trigger_time > TRIGGER_COOLDOWN:
+                    print(f"ACTION: Sleep gesture held: {current_prediction}")
+                    change_state("asleep")
+                    last_triggered = current_prediction
+                    last_trigger_time = now
+                    sleep_candidate_start = None
+
+            else:
+                sleep_candidate_start = None
+        if current_state == "asleep":
+            if sleep_started_time is not None and now - sleep_started_time >= SLEEP_DURATION_SECONDS:
+                change_state("awake")
+                sleep_started_time = None
+                last_triggered = None
+                sleep_candidate_start = None
+                print("ACTION: Sleep mode ended")
         if current_prediction not in ["sleep_left", "sleep_right"]:
             last_triggered = None
 
@@ -384,6 +436,10 @@ def main() -> None:
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
+
+        elif key == DEMO_KEY:
+            print("DEMO MODE: forced sleep transition")
+            change_state("asleep")
 
     cap.release()
     cv2.destroyAllWindows()

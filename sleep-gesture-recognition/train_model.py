@@ -114,7 +114,7 @@ def train_and_evaluate(df: pd.DataFrame) -> None:
     pipeline = Pipeline(
         steps=[
             ("scaler", StandardScaler()),
-            ("svc", SVC()),
+            ("svc", SVC(probability=True)),
         ]
     )
 
