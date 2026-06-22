@@ -18,9 +18,11 @@ import mediapipe as mp
 import numpy as np
 import pandas as pd
 from collections import Counter, deque
-import threading
-import sounddevice as sd
-import soundfile as sf
+
+import serial
+# import threading
+# import sounddevice as sd
+# import soundfile as sf
 
 # warning cleanup
 warnings.filterwarnings(
@@ -36,6 +38,12 @@ warnings.filterwarnings(
 BASE_DIR = Path(__file__).resolve().parent
 MODEL = BASE_DIR / "model" / "sleep_gesture_svm.joblib"
 AUDIO_PATH = BASE_DIR / "aloha.mp3"   # sound to play when sleep mode is initiated
+
+# serial settings
+SERIAL_PORT = "/dev/tty.usbmodem1101"  # placeholder: change later to actual device
+SERIAL_BAUDRATE = 115200
+
+serial_connection = None
 
 # settings
 CAMERA_INDEX = 0
@@ -229,29 +237,68 @@ def draw_label(frame, text: str, x: int, y: int, color=(0, 255, 0)) -> None:
         2,
         cv2.LINE_AA,
     )
+# new function to trigger sound by sending to serial instead of playing from this device
+def trigger_sound_effect():
+    send_serial_command("PLAY_SOUND")
 
-def play_sound_effect():
-    def _play():
-        try:
-            data, samplerate = sf.read(str(AUDIO_PATH), dtype="float32")
-            sd.play(data, samplerate)
-        except Exception as e:
-            print(f"Could not play sound effect: {e}")
+# connect to the hardware over serial
+def connect_serial():
+    global serial_connection
 
-    threading.Thread(target=_play, daemon=True).start()
+    try:
+        serial_connection = serial.Serial(
+            SERIAL_PORT,
+            SERIAL_BAUDRATE,
+            timeout=1
+        )
 
-# TO-DO: edit placeholder function for sending state to circuit to change LEDs
+        # arduino resets after connection
+        time.sleep(2)
+
+        print(f"Connected to serial device on {SERIAL_PORT}")
+
+    except Exception as e:
+        serial_connection = None
+        print(f"Could not connect to serial device: {e}")
+
+# send text commands through serial
+def send_serial_command(command):
+    global serial_connection
+
+    # handle no connection
+    if serial_connection is None:
+        print(f"[SERIAL NOT CONNECTED] Would send: {command}")
+        return
+
+    # send message
+    try:
+        message = f"{command}\n"
+        serial_connection.write(message.encode())
+
+        print(f"Sent: {command}")
+
+    # handle serial errors
+    except Exception as e:
+        print(f"Serial error: {e}")
+
+# send light command through serial
 def send_light_command(command):
     if command == "SLEEP":
-        return
+        send_serial_command("LIGHTS_SLEEP")
     elif command == "AWAKE":
-        return
+        send_serial_command("LIGHTS_AWAKE")
     return
 
 def initiate_sleep_transition(prediction):
-    play_sound_effect()
+    # tell external audio system to play sound
+    trigger_sound_effect()
 
-    # later this is where lights / projections / Arduino commands go
+    # lights enter sleep mode
+    send_light_command("SLEEP")
+
+    # audio enters sleep mode
+    send_serial_command("SLEEP_START")
+
     print("ACTION: Sleep transition initiated")
 
 
@@ -267,6 +314,9 @@ def main() -> None:
         )
     # load model
     model = joblib.load(MODEL)
+
+    # connect to serial
+    connect_serial()
 
     # start webcam
     cap = cv2.VideoCapture(CAMERA_INDEX)
@@ -416,6 +466,11 @@ def main() -> None:
                 sleep_started_time = None
                 last_triggered = None
                 sleep_candidate_start = None
+                # wake up lights
+                send_light_command("AWAKE")
+                # end sleep mode
+                send_serial_command("STOP_SOUND")
+                send_serial_command("SLEEP_END")
                 print("ACTION: Sleep mode ended")
         if current_prediction not in ["sleep_left", "sleep_right"]:
             last_triggered = None
@@ -443,6 +498,10 @@ def main() -> None:
 
     cap.release()
     cv2.destroyAllWindows()
+
+    if serial_connection is not None:
+        serial_connection.close()
+        print("Serial connection closed.")
 
 
 if __name__ == "__main__":
