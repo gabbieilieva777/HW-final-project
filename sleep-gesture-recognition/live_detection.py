@@ -20,9 +20,6 @@ import pandas as pd
 from collections import Counter, deque
 
 import serial
-# import threading
-# import sounddevice as sd
-# import soundfile as sf
 
 # warning cleanup
 warnings.filterwarnings(
@@ -37,13 +34,20 @@ warnings.filterwarnings(
 # paths
 BASE_DIR = Path(__file__).resolve().parent
 MODEL = BASE_DIR / "model" / "sleep_gesture_svm.joblib"
-AUDIO_PATH = BASE_DIR / "aloha.mp3"   # sound to play when sleep mode is initiated
 
 # serial settings
 SERIAL_PORT = "/dev/tty.usbmodem1101"  # placeholder: change later to actual device
 SERIAL_BAUDRATE = 115200
 
 serial_connection = None
+
+# packet settings
+# the packet is expected to contain 5 integer values separated by commas
+# this node modifies only the last value
+PACKET_LENGTH = 5
+SLEEP_INDEX = 4
+SLEEP_VALUE = 1
+DEFAULT_VALUE = -1
 
 # settings
 CAMERA_INDEX = 0
@@ -237,9 +241,6 @@ def draw_label(frame, text: str, x: int, y: int, color=(0, 255, 0)) -> None:
         2,
         cv2.LINE_AA,
     )
-# new function to trigger sound by sending to serial instead of playing from this device
-def trigger_sound_effect():
-    send_serial_command("PLAY_SOUND")
 
 # connect to the hardware over serial
 def connect_serial():
@@ -261,6 +262,50 @@ def connect_serial():
         serial_connection = None
         print(f"Could not connect to serial device: {e}")
 
+# receive one packet from serial
+def receive_serial_packet():
+    global serial_connection
+
+    if serial_connection is None:
+        return None
+
+    try:
+        if serial_connection.in_waiting > 0:
+            packet = serial_connection.readline().decode("utf-8").strip()
+
+            if packet:
+                print(f"Received packet: {packet}")
+                return packet
+
+    except Exception as e:
+        print(f"Serial receive error: {e}")
+
+    return None
+
+# update the last value in the packet with this node's sleep state
+def update_sleep_state_in_packet(packet, is_asleep):
+    try:
+        # convert comma-separated values to integers
+        values = [int(x.strip()) for x in packet.split(",")]
+
+        # packet should contain exactly 5 values
+        if len(values) != PACKET_LENGTH:
+            print(f"Invalid packet length: {packet}")
+            return packet
+
+        # only modify this node's value
+        if is_asleep:
+            values[SLEEP_INDEX] = SLEEP_VALUE
+        else:
+            values[SLEEP_INDEX] = DEFAULT_VALUE
+
+        # convert back to comma-separated string
+        return ",".join(str(v) for v in values)
+
+    except Exception as e:
+        print(f"Could not update packet: {e}")
+        return packet
+
 # send text commands through serial
 def send_serial_command(command):
     global serial_connection
@@ -281,24 +326,18 @@ def send_serial_command(command):
     except Exception as e:
         print(f"Serial error: {e}")
 
-# send light command through serial
-def send_light_command(command):
-    if command == "SLEEP":
-        send_serial_command("LIGHTS_SLEEP")
-    elif command == "AWAKE":
-        send_serial_command("LIGHTS_AWAKE")
-    return
+# receive packet, change this node's sleep value, and forward packet
+def handle_incoming_packet(is_asleep):
+    incoming_packet = receive_serial_packet()
+
+    if incoming_packet is None:
+        return
+
+    outgoing_packet = update_sleep_state_in_packet(incoming_packet, is_asleep)
+    print(f"Forwarding packet: {outgoing_packet}")
+    send_serial_command(outgoing_packet)
 
 def initiate_sleep_transition(prediction):
-    # tell external audio system to play sound
-    trigger_sound_effect()
-
-    # lights enter sleep mode
-    send_light_command("SLEEP")
-
-    # audio enters sleep mode
-    send_serial_command("SLEEP_START")
-
     print("ACTION: Sleep transition initiated")
 
 
@@ -307,11 +346,7 @@ def main() -> None:
     # check paths
     if not MODEL.exists():
         raise FileNotFoundError(f"Model not found: {MODEL}")
-    if not AUDIO_PATH.exists():
-        raise FileNotFoundError(
-            f"Audio file not found: {AUDIO_PATH}\n"
-            f"Put a WAV file named 'sleepy_sound.wav' next to this script, or change AUDIO_PATH."
-        )
+
     # load model
     model = joblib.load(MODEL)
 
@@ -379,6 +414,9 @@ def main() -> None:
 
     # reading from camera and making predictions
     while True:
+        # receive serial packet and forward it with updated sleep state
+        handle_incoming_packet(current_state == "asleep")
+
         ret, frame = cap.read()
         if not ret or frame is None:
             print("Failed to read from camera.")
@@ -466,11 +504,7 @@ def main() -> None:
                 sleep_started_time = None
                 last_triggered = None
                 sleep_candidate_start = None
-                # wake up lights
-                send_light_command("AWAKE")
                 # end sleep mode
-                send_serial_command("STOP_SOUND")
-                send_serial_command("SLEEP_END")
                 print("ACTION: Sleep mode ended")
         if current_prediction not in ["sleep_left", "sleep_right"]:
             last_triggered = None
