@@ -36,7 +36,7 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL = BASE_DIR / "model" / "sleep_gesture_svm.joblib"
 
 # serial settings
-SERIAL_PORT = "/dev/tty.usbmodem1101"  # placeholder: change later to actual device
+SERIAL_PORT = "/dev/cu.usbserial-1120"  # placeholder: change later to actual device
 SERIAL_BAUDRATE = 115200
 
 serial_connection = None
@@ -293,11 +293,18 @@ def update_sleep_state_in_packet(packet, is_asleep):
             print(f"Invalid packet length: {packet}")
             return packet
 
+        old_value = values[SLEEP_INDEX]
+
         # only modify this node's value
         if is_asleep:
             values[SLEEP_INDEX] = SLEEP_VALUE
         else:
             values[SLEEP_INDEX] = DEFAULT_VALUE
+
+        print(
+            f"Sleep value changed from {old_value} "
+            f"to {values[SLEEP_INDEX]}"
+        )
 
         # convert back to comma-separated string
         return ",".join(str(v) for v in values)
@@ -333,12 +340,14 @@ def handle_incoming_packet(is_asleep):
     if incoming_packet is None:
         return
 
-    outgoing_packet = update_sleep_state_in_packet(incoming_packet, is_asleep)
-    print(f"Forwarding packet: {outgoing_packet}")
-    send_serial_command(outgoing_packet)
+    outgoing_packet = update_sleep_state_in_packet(
+        incoming_packet,
+        is_asleep
+    )
 
-def initiate_sleep_transition(prediction):
-    print("ACTION: Sleep transition initiated")
+    print(f"Forwarding packet: {outgoing_packet}")
+
+    send_serial_command(outgoing_packet)
 
 
 # main
@@ -355,15 +364,30 @@ def main() -> None:
 
     # start webcam
     cap = cv2.VideoCapture(CAMERA_INDEX)
+
     if not cap.isOpened():
         raise RuntimeError("Could not open webcam.")
 
-    # ask camera for a normal resolution instead of stretching frames
+    # set resolution BEFORE reading frames
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
 
-    # help reduce camera buffering lag
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    # don't use buffersize on Mac for now
+    # cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    # warm up camera
+    print("Warming up camera...")
+    frame = None
+
+    for i in range(30):
+        ret, frame = cap.read()
+        if ret and frame is not None:
+            break
+        time.sleep(0.1)
+
+    if frame is None:
+        cap.release()
+        raise RuntimeError("Camera opened, but failed to read frames after warmup.")
 
     # stable prediction
     stable_pred = StablePrediction(window_size=SMOOTHING_WINDOW)
@@ -383,13 +407,28 @@ def main() -> None:
 
         if current_state == new_state:
             return
+
         # print state change
         print(f"STATE CHANGE: {current_state} -> {new_state}")
         current_state = new_state
+
         # time tracking and initiating sleep transition
         if new_state == "asleep":
             sleep_started_time = time.time()
-            initiate_sleep_transition("sleep")
+            print("ACTION: Sleep transition initiated")
+
+            # test packet for debugging without serial input
+            test_packet = "10,20,30,40,-1"
+            outgoing_packet = update_sleep_state_in_packet(test_packet, True)
+            send_serial_command(outgoing_packet)
+
+        elif new_state == "awake":
+            print("ACTION: Sleep transition ended")
+
+            # test packet for debugging without serial input
+            test_packet = "10,20,30,40,-1"
+            outgoing_packet = update_sleep_state_in_packet(test_packet, False)
+            send_serial_command(outgoing_packet)
 
     # prints
     print("Starting sleep gesture detection...")
@@ -412,15 +451,27 @@ def main() -> None:
         min_tracking_confidence=MIN_TRACKING_CONFIDENCE
     )
 
+    failed_reads = 0
+    MAX_FAILED_READS = 10
     # reading from camera and making predictions
     while True:
-        # receive serial packet and forward it with updated sleep state
-        handle_incoming_packet(current_state == "asleep")
 
         ret, frame = cap.read()
+
         if not ret or frame is None:
-            print("Failed to read from camera.")
-            break
+            failed_reads += 1
+            print(f"Failed to read from camera ({failed_reads}/{MAX_FAILED_READS})")
+            time.sleep(0.1)
+
+            if failed_reads >= MAX_FAILED_READS:
+                print("Too many camera read failures. Exiting.")
+                break
+
+            continue
+        failed_reads = 0
+
+        # receive serial packet and forward it with updated sleep state
+        handle_incoming_packet(current_state == "asleep")
 
         # keep the flip (data collection also uses this)
         frame = cv2.flip(frame, 1)
@@ -504,8 +555,6 @@ def main() -> None:
                 sleep_started_time = None
                 last_triggered = None
                 sleep_candidate_start = None
-                # end sleep mode
-                print("ACTION: Sleep mode ended")
         if current_prediction not in ["sleep_left", "sleep_right"]:
             last_triggered = None
 
