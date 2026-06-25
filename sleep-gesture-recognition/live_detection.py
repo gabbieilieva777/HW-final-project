@@ -36,10 +36,11 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL = BASE_DIR / "model" / "sleep_gesture_svm.joblib"
 
 # serial settings
-SERIAL_PORT = "/dev/cu.usbserial-1120"  # placeholder: change later to actual device
+SERIAL_PORT = "/dev/cu.usbserial-10"  # placeholder: change later to actual device
 SERIAL_BAUDRATE = 115200
 
 serial_connection = None
+last_received_packet = None
 
 # packet settings
 # the packet is expected to contain 5 integer values separated by commas
@@ -282,37 +283,35 @@ def receive_serial_packet():
 
     return None
 
-# update the last value in the packet with this node's sleep state
+def format_packet_value(value):
+    return f"{value:.2f}"
+
 def update_sleep_state_in_packet(packet, is_asleep):
     try:
-        # convert comma-separated values to integers
-        values = [int(x.strip()) for x in packet.split(",")]
+        values = [float(x.strip()) for x in packet.split(",")]
 
-        # packet should contain exactly 5 values
         if len(values) != PACKET_LENGTH:
             print(f"Invalid packet length: {packet}")
             return packet
 
         old_value = values[SLEEP_INDEX]
 
-        # only modify this node's value
         if is_asleep:
-            values[SLEEP_INDEX] = SLEEP_VALUE
+            values[SLEEP_INDEX] = float(SLEEP_VALUE)
         else:
-            values[SLEEP_INDEX] = DEFAULT_VALUE
+            values[SLEEP_INDEX] = float(DEFAULT_VALUE)
 
         print(
             f"Sleep value changed from {old_value} "
             f"to {values[SLEEP_INDEX]}"
         )
 
-        # convert back to comma-separated string
-        return ",".join(str(v) for v in values)
+        # keep packet format nice
+        return ",".join(format_packet_value(v) for v in values)
 
     except Exception as e:
         print(f"Could not update packet: {e}")
         return packet
-
 # send text commands through serial
 def send_serial_command(command):
     global serial_connection
@@ -333,12 +332,30 @@ def send_serial_command(command):
     except Exception as e:
         print(f"Serial error: {e}")
 
-# receive packet, change this node's sleep value, and forward packet
+def send_sleep_state_immediately(is_asleep):
+    global last_received_packet
+
+    if last_received_packet is None:
+        print("No previous packet available yet, cannot send immediate sleep update.")
+        return
+
+    outgoing_packet = update_sleep_state_in_packet(
+        last_received_packet,
+        is_asleep
+    )
+
+    print(f"Immediate sleep update: {outgoing_packet}")
+    send_serial_command(outgoing_packet)
+
 def handle_incoming_packet(is_asleep):
+    global last_received_packet
+
     incoming_packet = receive_serial_packet()
 
     if incoming_packet is None:
         return
+
+    last_received_packet = incoming_packet
 
     outgoing_packet = update_sleep_state_in_packet(
         incoming_packet,
@@ -348,7 +365,6 @@ def handle_incoming_packet(is_asleep):
     print(f"Forwarding packet: {outgoing_packet}")
 
     send_serial_command(outgoing_packet)
-
 
 # main
 def main() -> None:
@@ -408,27 +424,18 @@ def main() -> None:
         if current_state == new_state:
             return
 
-        # print state change
         print(f"STATE CHANGE: {current_state} -> {new_state}")
         current_state = new_state
 
-        # time tracking and initiating sleep transition
         if new_state == "asleep":
             sleep_started_time = time.time()
             print("ACTION: Sleep transition initiated")
-
-            # test packet for debugging without serial input
-            test_packet = "10,20,30,40,-1"
-            outgoing_packet = update_sleep_state_in_packet(test_packet, True)
-            send_serial_command(outgoing_packet)
+            send_sleep_state_immediately(True)
 
         elif new_state == "awake":
             print("ACTION: Sleep transition ended")
+            send_sleep_state_immediately(False)
 
-            # test packet for debugging without serial input
-            test_packet = "10,20,30,40,-1"
-            outgoing_packet = update_sleep_state_in_packet(test_packet, False)
-            send_serial_command(outgoing_packet)
 
     # prints
     print("Starting sleep gesture detection...")
